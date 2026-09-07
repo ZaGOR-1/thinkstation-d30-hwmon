@@ -10,12 +10,26 @@
 
 #define DRVNAME "d30_hwmon"
 
+#define D30_SIO_INDEX       0x2e
+#define D30_SIO_DATA        0x2f
+#define D30_SIO_LDN_HWM     0x0b
+#define D30_SIO_DEVID_HI    0xb2
+
+#define D30_SIO_REG_LDSEL   0x07
+#define D30_SIO_REG_DEVID   0x20
+#define D30_SIO_REG_ENABLE  0x30
+#define D30_SIO_REG_ADDR    0x60
+
 #define D30_PAGE   0xA00
 #define D30_INDEX  0xA01
 #define D30_DATA   0xA02
 
+#define D30_INTRUSION_PORT  0x466
+#define D30_INTRUSION_MASK  BIT(0)
+
 static DEFINE_MUTEX(d30_lock);
 static struct device *hwmon_dev;
+static bool intrusion_region_claimed;
 
 static const struct dmi_system_id d30_dmi_table[] = {
 	{
@@ -30,6 +44,77 @@ static const struct dmi_system_id d30_dmi_table[] = {
 };
 
 MODULE_DEVICE_TABLE(dmi, d30_dmi_table);
+
+
+/* ============================================================
+ * Super-I/O detection
+ *
+ * Lenovo's A3KT70A BIOS checks for an NCT6681-class device by
+ * comparing the high byte of the Super-I/O device ID with 0xB2.
+ * It then verifies that logical device 0x0B is enabled at 0xA00.
+ * ============================================================
+ */
+
+static inline void d30_superio_outb(u8 reg, u8 value)
+{
+	outb(reg, D30_SIO_INDEX);
+	outb(value, D30_SIO_DATA);
+}
+
+static inline u8 d30_superio_inb(u8 reg)
+{
+	outb(reg, D30_SIO_INDEX);
+	return inb(D30_SIO_DATA);
+}
+
+static int d30_detect_nct6681(void)
+{
+	u16 device_id, hwm_base;
+	u8 enabled;
+
+	if (!request_muxed_region(D30_SIO_INDEX, 2, DRVNAME)) {
+		pr_err(DRVNAME ": Super-I/O ports 0x2e-0x2f are busy\n");
+		return -EBUSY;
+	}
+
+	/* Enter Nuvoton extended-function mode. */
+	outb(0x87, D30_SIO_INDEX);
+	outb(0x87, D30_SIO_INDEX);
+
+	device_id = (d30_superio_inb(D30_SIO_REG_DEVID) << 8) |
+		    d30_superio_inb(D30_SIO_REG_DEVID + 1);
+
+	d30_superio_outb(D30_SIO_REG_LDSEL, D30_SIO_LDN_HWM);
+	enabled = d30_superio_inb(D30_SIO_REG_ENABLE);
+	hwm_base = (d30_superio_inb(D30_SIO_REG_ADDR) << 8) |
+		   d30_superio_inb(D30_SIO_REG_ADDR + 1);
+
+	/* Leave extended-function mode. */
+	outb(0xaa, D30_SIO_INDEX);
+	release_region(D30_SIO_INDEX, 2);
+
+	if ((device_id >> 8) != D30_SIO_DEVID_HI) {
+		pr_err(DRVNAME ": unexpected Super-I/O device ID 0x%04x\n",
+		       device_id);
+		return -ENODEV;
+	}
+
+	if (!(enabled & BIT(0))) {
+		pr_err(DRVNAME ": NCT6681 hardware-monitor logical device is disabled\n");
+		return -ENODEV;
+	}
+
+	if (hwm_base != D30_PAGE) {
+		pr_err(DRVNAME ": unexpected NCT6681 EC base 0x%04x (expected 0x%03x)\n",
+		       hwm_base, D30_PAGE);
+		return -ENODEV;
+	}
+
+	pr_info(DRVNAME ": NCT6681 device ID 0x%04x, EC base 0x%04x\n",
+		device_id, hwm_base);
+
+	return 0;
+}
 
 
 /*
@@ -96,13 +181,13 @@ static const u8 temp_regs[] = {
 };
 
 static const char * const temp_labels[] = {
-	"NCT Temp1 - Ambient/Intake candidate",
-	"NCT Temp2 - Board sensor",
-	"NCT Temp3 - Board sensor",
-	"NCT Temp4 - PCH candidate",
-	"NCT Temp5 - CPU board sensor",
-	"NCT Temp7 - Board sensor",
-	"NCT Temp8 - Memory area candidate",
+	"System temperature1",
+	"System temperature2",
+	"System temperature3",
+	"System temperature4",
+	"CPU Package (EC mirror)",
+	"System temperature7",
+	"System temperature8",
 };
 
 static ssize_t temp_show(struct device *dev,
@@ -111,14 +196,31 @@ static ssize_t temp_show(struct device *dev,
 {
 	struct sensor_device_attribute *sattr = to_sensor_dev_attr(attr);
 	unsigned int idx = sattr->index;
-	u8 raw;
+	s16 raw;
 
 	if (idx >= ARRAY_SIZE(temp_regs))
 		return -EINVAL;
 
-	raw = d30_read(1, temp_regs[idx]);
+	raw = (s16)d30_read16(1, temp_regs[idx]);
 
-	return sprintf(buf, "%u\n", raw * 1000);
+	/* NCT668x temperature format: signed 16-bit value in 0.5 C units. */
+	return sprintf(buf, "%d\n", (raw / 128) * 500);
+}
+
+static ssize_t temp_raw_low_show(struct device *dev,
+				 struct device_attribute *attr,
+				 char *buf)
+{
+	struct sensor_device_attribute *sattr = to_sensor_dev_attr(attr);
+	unsigned int idx = sattr->index;
+	u8 raw_low;
+
+	if (idx >= ARRAY_SIZE(temp_regs))
+		return -EINVAL;
+
+	raw_low = d30_read(1, temp_regs[idx] + 1);
+
+	return sprintf(buf, "%u\n", raw_low);
 }
 
 static ssize_t temp_label_show(struct device *dev,
@@ -141,6 +243,19 @@ static SENSOR_DEVICE_ATTR_RO(temp4_input, temp, 3);
 static SENSOR_DEVICE_ATTR_RO(temp5_input, temp, 4);
 static SENSOR_DEVICE_ATTR_RO(temp6_input, temp, 5);
 static SENSOR_DEVICE_ATTR_RO(temp7_input, temp, 6);
+
+/*
+ * Diagnostic attributes. Lenovo's BIOS displays only the high byte as
+ * whole degrees Celsius. The adjacent low byte is exposed without applying
+ * an unverified conversion so its behaviour can be studied safely.
+ */
+static SENSOR_DEVICE_ATTR_RO(temp1_raw_low, temp_raw_low, 0);
+static SENSOR_DEVICE_ATTR_RO(temp2_raw_low, temp_raw_low, 1);
+static SENSOR_DEVICE_ATTR_RO(temp3_raw_low, temp_raw_low, 2);
+static SENSOR_DEVICE_ATTR_RO(temp4_raw_low, temp_raw_low, 3);
+static SENSOR_DEVICE_ATTR_RO(temp5_raw_low, temp_raw_low, 4);
+static SENSOR_DEVICE_ATTR_RO(temp6_raw_low, temp_raw_low, 5);
+static SENSOR_DEVICE_ATTR_RO(temp7_raw_low, temp_raw_low, 6);
 
 static SENSOR_DEVICE_ATTR_RO(temp1_label, temp_label, 0);
 static SENSOR_DEVICE_ATTR_RO(temp2_label, temp_label, 1);
@@ -166,9 +281,9 @@ static const u8 fan_regs[] = {
 };
 
 static const char * const fan_labels[] = {
-	"NCT Fan1",
-	"NCT Fan3 - CPU-related",
-	"NCT Fan7",
+	"Fan1 Speed",
+	"Fan3 Speed",
+	"Fan7 Speed",
 };
 
 static ssize_t fan_show(struct device *dev,
@@ -298,6 +413,32 @@ static SENSOR_DEVICE_ATTR_RO(in6_label, voltage_label, 6);
 
 
 /* ============================================================
+ * Chassis intrusion
+ *
+ * Lenovo's ChassisIntrusionS3 BIOS module reads I/O port 0x466 bit 0.
+ * Reading does not acknowledge or clear the latched alarm. Clearing remains
+ * under BIOS control.
+ * ============================================================
+ */
+
+static ssize_t intrusion_show(struct device *dev,
+			      struct device_attribute *attr,
+			      char *buf)
+{
+	unsigned int alarm;
+
+	if (!intrusion_region_claimed)
+		return -ENODEV;
+
+	alarm = !!(inb(D30_INTRUSION_PORT) & D30_INTRUSION_MASK);
+
+	return sprintf(buf, "%u\n", alarm);
+}
+
+static SENSOR_DEVICE_ATTR_RO(intrusion0_alarm, intrusion, 0);
+
+
+/* ============================================================
  * hwmon attributes
  * ============================================================
  */
@@ -311,6 +452,14 @@ static struct attribute *d30_attrs[] = {
 	&sensor_dev_attr_temp5_input.dev_attr.attr,
 	&sensor_dev_attr_temp6_input.dev_attr.attr,
 	&sensor_dev_attr_temp7_input.dev_attr.attr,
+
+	&sensor_dev_attr_temp1_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp2_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp3_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp4_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp5_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp6_raw_low.dev_attr.attr,
+	&sensor_dev_attr_temp7_raw_low.dev_attr.attr,
 
 	&sensor_dev_attr_temp1_label.dev_attr.attr,
 	&sensor_dev_attr_temp2_label.dev_attr.attr,
@@ -346,11 +495,26 @@ static struct attribute *d30_attrs[] = {
 	&sensor_dev_attr_in5_label.dev_attr.attr,
 	&sensor_dev_attr_in6_label.dev_attr.attr,
 
+	/* chassis intrusion */
+	&sensor_dev_attr_intrusion0_alarm.dev_attr.attr,
+
 	NULL
 };
 
+static umode_t d30_is_visible(struct kobject *kobj,
+			      struct attribute *attr,
+			      int index)
+{
+	if (attr == &sensor_dev_attr_intrusion0_alarm.dev_attr.attr &&
+	    !intrusion_region_claimed)
+		return 0;
+
+	return attr->mode;
+}
+
 static const struct attribute_group d30_group = {
 	.attrs = d30_attrs,
+	.is_visible = d30_is_visible,
 };
 
 static const struct attribute_group *d30_groups[] = {
@@ -366,6 +530,8 @@ static const struct attribute_group *d30_groups[] = {
 
 static int __init d30_init(void)
 {
+	int err;
+
 	if (!dmi_check_system(d30_dmi_table)) {
 		pr_err(DRVNAME ": unsupported system; refusing to access NCT6681 I/O ports\n");
 		return -ENODEV;
@@ -373,20 +539,34 @@ static int __init d30_init(void)
 
 	pr_info(DRVNAME ": Lenovo ThinkStation D30 detected via DMI\n");
 
+	err = d30_detect_nct6681();
+	if (err)
+		return err;
+
 	if (!request_region(D30_PAGE, 3, DRVNAME)) {
 		pr_err(DRVNAME ": I/O ports 0xA00-0xA02 busy\n");
 		return -EBUSY;
+	}
+
+	if (request_region(D30_INTRUSION_PORT, 1, DRVNAME)) {
+		intrusion_region_claimed = true;
+	} else {
+		pr_warn(DRVNAME ": chassis-intrusion port 0x466 busy; alarm will not be exposed\n");
 	}
 
 	hwmon_dev = hwmon_device_register_with_groups(
 		NULL, DRVNAME, NULL, d30_groups);
 
 	if (IS_ERR(hwmon_dev)) {
+		if (intrusion_region_claimed) {
+			release_region(D30_INTRUSION_PORT, 1);
+			intrusion_region_claimed = false;
+		}
 		release_region(D30_PAGE, 3);
 		return PTR_ERR(hwmon_dev);
 	}
 
-	pr_info(DRVNAME ": ThinkStation D30 NCT6681 sensors registered (read-only)\n");
+	pr_info(DRVNAME ": ThinkStation D30 NCT6681 sensors registered (read-only, BIOS-verified map)\n");
 
 	return 0;
 }
@@ -394,6 +574,10 @@ static int __init d30_init(void)
 static void __exit d30_exit(void)
 {
 	hwmon_device_unregister(hwmon_dev);
+	if (intrusion_region_claimed) {
+		release_region(D30_INTRUSION_PORT, 1);
+		intrusion_region_claimed = false;
+	}
 	release_region(D30_PAGE, 3);
 
 	pr_info(DRVNAME ": unloaded\n");
@@ -404,4 +588,5 @@ module_exit(d30_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ThinkStation D30 hwmon");
-MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver");
+MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver using BIOS-verified registers");
+MODULE_VERSION("1.5");

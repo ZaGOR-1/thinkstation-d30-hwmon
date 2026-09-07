@@ -2,7 +2,7 @@
 set -euo pipefail
 
 NAME="d30-hwmon"
-VERSION="1.1"
+VERSION="1.5"
 MODULE="d30_hwmon"
 
 if [ "$(id -u)" -ne 0 ]; then
