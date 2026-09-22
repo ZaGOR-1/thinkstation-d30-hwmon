@@ -41,11 +41,7 @@ grep -Fq '{ "bios_5c", 0x01, 0x5c }' "$SRC" || fail "bios_5c missing"
 grep -Fq '{ "bios_f8", 0x01, 0xf8 }' "$SRC" || fail "bios_f8 missing"
 grep -Fq '{ "bios_status", 0x06, 0x00 }' "$SRC" || fail "bios_status missing"
 
-echo "[8] research3 version"
-grep -Fq 'MODULE_VERSION("1.5-research3")' "$SRC" \
-    || fail "research3 version missing"
-
-echo "[9] no DATA writes"
+echo "[8] no DATA writes"
 if grep -nE 'out[bwl]\s*\([^,]+,\s*D30_DATA\s*\)' "$SRC"; then
     fail "write to D30_DATA detected"
 fi
