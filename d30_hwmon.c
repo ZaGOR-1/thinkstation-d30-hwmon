@@ -30,6 +30,11 @@
 static DEFINE_MUTEX(d30_lock);
 static struct device *hwmon_dev;
 static bool intrusion_region_claimed;
+static bool research_dump;
+
+module_param(research_dump, bool, 0400);
+MODULE_PARM_DESC(research_dump,
+                 "Dump BIOS-verified NCT6681 fan-control registers at module load");
 
 static const struct dmi_system_id d30_dmi_table[] = {
 	{
@@ -161,6 +166,88 @@ static u16 d30_read16(u8 page, u8 reg)
 	return (hi << 8) | lo;
 }
 
+
+/* ============================================================
+ * Fan-control research support
+ *
+ * This path is intentionally READ-ONLY. The register ranges below
+ * were recovered from Lenovo A3KT70A fancontrolpei firmware.
+ *
+ * Access still selects PAGE and INDEX, exactly like normal sensor
+ * reads, but D30_DATA (0xA02) is never written.
+ * ============================================================
+ */
+
+struct d30_research_block {
+	const char *name;
+	u8 page;
+	u8 start;
+	u8 end;
+};
+
+static const struct d30_research_block d30_research_blocks[] = {
+	{ "Fan1", 0x07, 0x00, 0x17 },
+	{ "Fan3", 0x07, 0x30, 0x47 },
+	{ "Fan7", 0x07, 0x90, 0xa7 },
+};
+
+struct d30_research_reg {
+	const char *name;
+	u8 page;
+	u8 reg;
+};
+
+static const struct d30_research_reg d30_research_regs[] = {
+	{ "config_5a", 0x01, 0x5a },
+	{ "config_5b", 0x01, 0x5b },
+	{ "config_5c", 0x01, 0x5c },
+	{ "config_f8", 0x01, 0xf8 },
+	{ "status_00", 0x06, 0x00 },
+};
+
+static void d30_research_dump_block(const struct d30_research_block *block)
+{
+	u8 data[0x18];
+	unsigned int i;
+	unsigned int len = block->end - block->start + 1;
+
+	if (WARN_ON(len > ARRAY_SIZE(data)))
+		return;
+
+	for (i = 0; i < len; i++)
+		data[i] = d30_read(block->page, block->start + i);
+
+	pr_info(DRVNAME ": research %s page 0x%02x regs 0x%02x-0x%02x\n",
+		block->name, block->page, block->start, block->end);
+
+	for (i = 0; i < len; i += 8) {
+		unsigned int count = min_t(unsigned int, 8, len - i);
+
+		pr_info(DRVNAME ": research %s reg 0x%02x: %*ph\n",
+			block->name, block->start + i,
+			(int)count, &data[i]);
+	}
+}
+
+static void d30_research_dump_registers(void)
+{
+	unsigned int i;
+
+	pr_info(DRVNAME ": research dump BEGIN (read-only)\n");
+
+	for (i = 0; i < ARRAY_SIZE(d30_research_blocks); i++)
+		d30_research_dump_block(&d30_research_blocks[i]);
+
+	for (i = 0; i < ARRAY_SIZE(d30_research_regs); i++) {
+		const struct d30_research_reg *reg = &d30_research_regs[i];
+		u8 value = d30_read(reg->page, reg->reg);
+
+		pr_info(DRVNAME ": research %s page 0x%02x reg 0x%02x = 0x%02x\n",
+			reg->name, reg->page, reg->reg, value);
+	}
+
+	pr_info(DRVNAME ": research dump END\n");
+}
 
 /* ============================================================
  * Temperatures
@@ -548,6 +635,9 @@ static int __init d30_init(void)
 		return -EBUSY;
 	}
 
+	if (research_dump)
+		d30_research_dump_registers();
+
 	if (request_region(D30_INTRUSION_PORT, 1, DRVNAME)) {
 		intrusion_region_claimed = true;
 	} else {
@@ -589,4 +679,4 @@ module_exit(d30_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ThinkStation D30 hwmon");
 MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver using BIOS-verified registers");
-MODULE_VERSION("1.5");
+MODULE_VERSION("1.5-research1");
