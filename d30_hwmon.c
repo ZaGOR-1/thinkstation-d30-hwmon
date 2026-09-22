@@ -5,6 +5,7 @@
 #include <linux/ioport.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
+#include <linux/sysfs.h>
 #include <linux/mutex.h>
 #include <linux/dmi.h>
 
@@ -34,7 +35,7 @@ static bool research_dump;
 
 module_param(research_dump, bool, 0400);
 MODULE_PARM_DESC(research_dump,
-                 "Dump BIOS-verified NCT6681 fan-control registers at module load");
+                 "Enable read-only NCT6681 fan-control research dump/readout");
 
 static const struct dmi_system_id d30_dmi_table[] = {
 	{
@@ -204,6 +205,56 @@ static const struct d30_research_reg d30_research_regs[] = {
 	{ "config_f8", 0x01, 0xf8 },
 	{ "status_00", 0x06, 0x00 },
 };
+
+static const struct d30_research_block d30_research_candidate_blocks[] = {
+	{ "pwm_current", 0x01, 0x60, 0x67 },
+	{ "fanout_cfg", 0x01, 0xd0, 0xd7 },
+	{ "pwm_write", 0x0a, 0x28, 0x2f },
+};
+
+static const struct d30_research_reg d30_research_candidate_regs[] = {
+	{ "fan_cfg_ctrl", 0x0a, 0x01 },
+};
+
+static ssize_t research_candidates_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	ssize_t len = 0;
+	unsigned int i, reg;
+
+	for (i = 0; i < ARRAY_SIZE(d30_research_candidate_blocks); i++) {
+		const struct d30_research_block *block =
+			&d30_research_candidate_blocks[i];
+
+		len += sysfs_emit_at(buf, len,
+				    "%s page=0x%02x regs=0x%02x-0x%02x:",
+				    block->name, block->page,
+				    block->start, block->end);
+
+		for (reg = block->start; reg <= block->end; reg++)
+			len += sysfs_emit_at(buf, len, " %02x",
+					     d30_read(block->page, reg));
+
+		len += sysfs_emit_at(buf, len, "\n");
+	}
+
+	for (i = 0; i < ARRAY_SIZE(d30_research_candidate_regs); i++) {
+		const struct d30_research_reg *candidate =
+			&d30_research_candidate_regs[i];
+
+		len += sysfs_emit_at(buf, len,
+				    "%s page=0x%02x reg=0x%02x: %02x\n",
+				    candidate->name, candidate->page,
+				    candidate->reg,
+				    d30_read(candidate->page, candidate->reg));
+	}
+
+	return len;
+}
+
+static DEVICE_ATTR_RO(research_candidates);
+
 
 static void d30_research_dump_block(const struct d30_research_block *block)
 {
@@ -582,6 +633,9 @@ static struct attribute *d30_attrs[] = {
 	&sensor_dev_attr_in5_label.dev_attr.attr,
 	&sensor_dev_attr_in6_label.dev_attr.attr,
 
+	/* research-only candidate registers; hidden unless research_dump=1 */
+	&dev_attr_research_candidates.attr,
+
 	/* chassis intrusion */
 	&sensor_dev_attr_intrusion0_alarm.dev_attr.attr,
 
@@ -592,6 +646,9 @@ static umode_t d30_is_visible(struct kobject *kobj,
 			      struct attribute *attr,
 			      int index)
 {
+	if (attr == &dev_attr_research_candidates.attr && !research_dump)
+		return 0;
+
 	if (attr == &sensor_dev_attr_intrusion0_alarm.dev_attr.attr &&
 	    !intrusion_region_claimed)
 		return 0;
@@ -679,4 +736,4 @@ module_exit(d30_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ThinkStation D30 hwmon");
 MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver using BIOS-verified registers");
-MODULE_VERSION("1.5-research1");
+MODULE_VERSION("1.5-research2");
