@@ -221,6 +221,9 @@ static const struct d30_research_block d30_research_candidate_blocks[] = {
 
 	/* Research4: bounded live monitor-page scan. */
 	{ "monitor_01", 0x01, 0x10, 0x5f },
+
+	/* Research5: bounded runtime/status probe. */
+	{ "runtime_01", 0x01, 0x68, 0x80 },
 };
 
 static const struct d30_research_reg d30_research_candidate_regs[] = {
@@ -754,4 +757,4 @@ module_exit(d30_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ThinkStation D30 hwmon");
 MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver using BIOS-verified registers");
-MODULE_VERSION("1.5-research4");
+MODULE_VERSION("1.5-research5");

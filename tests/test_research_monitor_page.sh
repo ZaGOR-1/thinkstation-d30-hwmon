@@ -18,15 +18,11 @@ COUNT="$(grep -Fc '{ "monitor_01", 0x01, 0x10, 0x5f }' "$SRC")"
 [ "$COUNT" -eq 1 ] \
     || fail "unexpected monitor_01 definition count: $COUNT"
 
-echo "[3] research4 version"
-grep -Fq 'MODULE_VERSION("1.5-research4")' "$SRC" \
-    || fail "research4 version missing"
-
-echo "[4] research readout remains read-only"
+echo "[3] research readout remains read-only"
 grep -q 'DEVICE_ATTR_RO(research_candidates)' "$SRC" \
     || fail "research_candidates is no longer read-only"
 
-echo "[5] no EC DATA-port writes"
+echo "[4] no EC DATA-port writes"
 if grep -nE 'out[bwl]\s*\([^,]+,\s*D30_DATA\s*\)' "$SRC"; then
     fail "write to D30_DATA detected"
 fi
