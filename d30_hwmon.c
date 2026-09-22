@@ -210,10 +210,25 @@ static const struct d30_research_block d30_research_candidate_blocks[] = {
 	{ "pwm_current", 0x01, 0x60, 0x67 },
 	{ "fanout_cfg", 0x01, 0xd0, 0xd7 },
 	{ "pwm_write", 0x0a, 0x28, 0x2f },
+
+	/* Lenovo A3KT70A fancontrolpei BIOS-confirmed ranges. */
+	{ "bios_sel", 0x01, 0xc0, 0xc7 },
+	{ "bios_06_08", 0x06, 0x08, 0x0a },
+	{ "bios_06_0c", 0x06, 0x0c, 0x0f },
+	{ "bios_06_38", 0x06, 0x38, 0x3a },
+	{ "bios_06_3c", 0x06, 0x3c, 0x3f },
+	{ "bios_06_60", 0x06, 0x60, 0x77 },
 };
 
 static const struct d30_research_reg d30_research_candidate_regs[] = {
 	{ "fan_cfg_ctrl", 0x0a, 0x01 },
+
+	{ "bios_5a", 0x01, 0x5a },
+	{ "bios_5b", 0x01, 0x5b },
+	{ "bios_5c", 0x01, 0x5c },
+	{ "bios_f8", 0x01, 0xf8 },
+	{ "bios_f9", 0x01, 0xf9 },
+	{ "bios_status", 0x06, 0x00 },
 };
 
 static ssize_t research_candidates_show(struct device *dev,
@@ -736,4 +751,4 @@ module_exit(d30_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("ThinkStation D30 hwmon");
 MODULE_DESCRIPTION("Read-only Lenovo ThinkStation D30 NCT6681 hwmon driver using BIOS-verified registers");
-MODULE_VERSION("1.5-research2");
+MODULE_VERSION("1.5-research3");
